@@ -1,0 +1,51 @@
+name: Clean up orphan images
+
+on:
+  schedule:
+    - cron: "17 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      delete:
+        description: "Delete the orphans (otherwise a dry run only lists them)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cleanup-orphan-images
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    env:
+      # Scheduled runs only delete once the repository variable DELETE_ORPHANS is set to "true".
+      DELETE: ${{ github.event_name == 'workflow_dispatch' && inputs.delete || (github.event_name == 'schedule' && vars.DELETE_ORPHANS == 'true') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find (and remove) orphan images
+        run: python3 scripts/cleanup_orphans.py
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ORG: ${{ github.repository_owner }}
+
+      - name: Commit and push
+        if: env.DELETE == 'true'
+        run: |
+          if git diff --cached --quiet; then
+            echo "No orphan image to delete."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Delete images no longer linked from any issue or comment"
+          # The dashboard commits uploads to the same branch: rebase on them before pushing.
+          for attempt in 1 2 3; do
+            git pull --rebase -q origin "${GITHUB_REF_NAME}" && git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            sleep 5
+          done
+          exit 1
